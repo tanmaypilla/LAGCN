@@ -17,8 +17,8 @@ Code for LAGCN
 * [x] Upload NW-UCLA configs
 * [x] Add ensemble code
 * [x] Upload pretrained weights
-* [ ] Add code of generating CPR graph (loss relevant)
-* [ ] Add code of generating GPR graph (input data relevant)
+* [x] Add code of generating CPR graph (loss relevant)
+* [x] Add code of generating GPR graph (input data relevant)
 
 ## Data Preparation
 
