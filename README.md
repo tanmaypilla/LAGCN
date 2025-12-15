@@ -79,7 +79,11 @@ Put downloaded data into the following directory structure:
 
 
 
-# Training & Testing
+## CPR & GPR
+
+Edit and run `graph_gen/extract_cls_specific_embedding.py` to obtain CPR & GPR graph.
+
+## Training & Testing
 
 ### Training
 
@@ -130,14 +134,12 @@ Thanks to the original authors for their work!
 
 Please cite this work if you find it useful:
 ```
-@article{xu2023language,
-      title={Language Knowledge-Assisted Representation Learning for Skeleton-Based Action Recognition}, 
-      author={Haojun Xu and Yan Gao and Zheng Hui and Jie Li and Xinbo Gao},
-      year={2023},
-      primaryClass={cs.CV},
-      journal={CoRR},
-      volume={abs/2305.12398},
-      url={https://arxiv.org/abs/2305.12398}
+@article{xu2025language,
+  title={Language knowledge-assisted representation learning for skeleton-based action recognition},
+  author={Xu, Haojun and Gao, Yan and Hui, Zheng and Li, Jie and Gao, Xinbo},
+  journal={IEEE Transactions on Multimedia},
+  year={2025},
+  publisher={IEEE}
 }
 ```
 
