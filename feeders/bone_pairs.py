@@ -119,7 +119,33 @@ ntu_infogcn_pairs_incorrect_k_2 = [
 
 # generate from pyskl graph defination, correct version
 ntu_infogcn_pairs_correct_k_2 = [
-    (0, 20), (1, -1), (2, -1), (3, 20), (4, -1), (5, 20), (6, 4), (7, 5), 
-    (8, -1), (9, 20), (10, 8), (11, 9), (12, 1), (13, 0), (14, 12), (15, 13), 
+    (0, 20), (1, -1), (2, -1), (3, 20), (4, -1), (5, 20), (6, 4), (7, 5),
+    (8, -1), (9, 20), (10, 8), (11, 9), (12, 1), (13, 0), (14, 12), (15, 13),
     (16, 1), (17, 0), (18, 16), (19, 17), (20, -1), (21, 6), (22, 6), (23, 10), (24, 10)
 ]
+
+# Hockey 20-joint skeleton bone pairs
+# (v1, v2) means bone[v1] = pos[v1] - pos[v2]
+# Terminal/leaf joints not appearing as v1 get zero bone vectors (right_ear=1, left_wrist=8,
+# right_wrist=10, right_foot=15, left_foot=16, stick_tip=19)
+hockey_pairs = (
+    (2, 1),   # nose -> left_ear
+    (2, 0),   # nose -> right_ear
+    (0, 1),   # right_ear -> left_ear
+    (3, 4),   # right_shoulder -> left_shoulder
+    (3, 5),   # right_shoulder -> right_hip
+    (4, 6),   # left_shoulder -> left_hip
+    (5, 6),   # right_hip -> left_hip
+    (3, 7),   # right_shoulder -> right_elbow
+    (7, 10),  # right_elbow -> right_wrist
+    (4, 9),   # left_shoulder -> left_elbow
+    (9, 8),   # left_elbow -> left_wrist
+    (5, 11),  # right_hip -> right_knee
+    (11, 14), # right_knee -> right_ankle
+    (14, 15), # right_ankle -> right_foot_tip
+    (6, 12),  # left_hip -> left_knee
+    (12, 13), # left_knee -> left_ankle
+    (13, 16), # left_ankle -> left_foot_tip
+    (17, 18), # stick_top -> stick_middle
+    (18, 19), # stick_middle -> stick_tip
+)

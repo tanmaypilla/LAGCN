@@ -75,6 +75,12 @@ def get_parser():
     parser = argparse.ArgumentParser(
         description='Spatial Temporal Graph Convolution Network')
     parser.add_argument(
+        '--class-names',
+        type=str,
+        default=None,
+        nargs='+',
+        help='class names for per-class accuracy reporting')
+    parser.add_argument(
         '--work-dir',
         default='./work_dir/temp',
         help='the work folder for storing results')
@@ -218,19 +224,50 @@ def get_parser():
     # force rerun
     parser.add_argument(
         '--force-rerun', type=str2bool, default=False, help='force rerun or not')
+    # imbalance handling
+    parser.add_argument(
+        '--use-weighted-sampler', type=str2bool, default=False,
+        help='use WeightedRandomSampler to balance class frequencies during training')
+    parser.add_argument(
+        '--focal-gamma', type=float, default=0.0,
+        help='gamma for focal loss (0 = standard CrossEntropy, 2.0 = standard focal)')
 
     return parser
 
+class FocalLoss(nn.Module):
+    """Focal loss: down-weights easy/frequent examples, focuses on hard ones.
+    gamma=0 reduces to standard CrossEntropy. gamma=2 is the standard focal setting."""
+    def __init__(self, gamma=2.0):
+        super().__init__()
+        self.gamma = gamma
+
+    def forward(self, x, label):
+        import torch.nn.functional as F
+        ce = F.cross_entropy(x, label, reduction='none')
+        pt = torch.exp(-ce)
+        return ((1 - pt) ** self.gamma * ce).mean()
+
+
 class WeightSumLoss(nn.Module):
-    def __init__(self, weight=0.1):
+    def __init__(self, weight=0.1, focal_gamma=0.0):
         super().__init__()
         self.weight = weight
 
-        self.loss = nn.CrossEntropyLoss()
+        if focal_gamma > 0:
+            self.loss = FocalLoss(gamma=focal_gamma)
+        else:
+            self.loss = nn.CrossEntropyLoss()
+        # aux branch always uses standard CE (CPR is a structural prior, not classification)
         self.aux_loss = nn.CrossEntropyLoss()
 
     def forward(self, x, aux, label):
         return self.loss(x, label) + self.weight * self.aux_loss(aux, label)
+
+    def forward_with_components(self, x, aux, label):
+        """Returns (total_loss, loss_main, loss_aux) for separate tracking."""
+        loss_main = self.loss(x, label)
+        loss_aux = self.aux_loss(aux, label)
+        return loss_main + self.weight * loss_aux, loss_main, loss_aux
 
 class Processor():
     """ 
@@ -252,7 +289,8 @@ class Processor():
                     if answer == 'y':
                         shutil.rmtree(arg.model_saved_name)
                         print('Dir removed: ', arg.model_saved_name)
-                        input('Refresh the website of tensorboard by pressing any keys')
+                        if not arg.force_rerun:
+                            input('Refresh the website of tensorboard by pressing any keys')
                     else:
                         print('Dir not removed: ', arg.model_saved_name)
                 self.train_writer = SummaryWriter(os.path.join(arg.model_saved_name, 'train'), 'train')
@@ -285,13 +323,32 @@ class Processor():
         Feeder = import_class(self.arg.feeder)
         self.data_loader = dict()
         if self.arg.phase == 'train':
-            self.data_loader['train'] = torch.utils.data.DataLoader(
-                dataset=Feeder(**self.arg.train_feeder_args),
-                batch_size=self.arg.batch_size,
-                shuffle=True,
-                num_workers=self.arg.num_worker,
-                drop_last=True,
-                worker_init_fn=init_seed)
+            train_dataset = Feeder(**self.arg.train_feeder_args)
+            if self.arg.use_weighted_sampler:
+                labels = np.array(train_dataset.label)
+                class_counts = np.bincount(labels)
+                # inverse-frequency weight per sample; rare classes sampled more often
+                sample_weights = 1.0 / class_counts[labels]
+                sampler = torch.utils.data.WeightedRandomSampler(
+                    weights=sample_weights,
+                    num_samples=len(sample_weights),
+                    replacement=True)
+                self.print_log(f'WeightedRandomSampler: class counts = {class_counts.tolist()}')
+                self.data_loader['train'] = torch.utils.data.DataLoader(
+                    dataset=train_dataset,
+                    batch_size=self.arg.batch_size,
+                    sampler=sampler,
+                    num_workers=self.arg.num_worker,
+                    drop_last=True,
+                    worker_init_fn=init_seed)
+            else:
+                self.data_loader['train'] = torch.utils.data.DataLoader(
+                    dataset=train_dataset,
+                    batch_size=self.arg.batch_size,
+                    shuffle=True,
+                    num_workers=self.arg.num_worker,
+                    drop_last=True,
+                    worker_init_fn=init_seed)
         self.data_loader['test'] = torch.utils.data.DataLoader(
             dataset=Feeder(**self.arg.test_feeder_args),
             batch_size=self.arg.test_batch_size,
@@ -308,7 +365,10 @@ class Processor():
         print(Model)
         self.model = Model(**self.arg.model_args)
         print(self.model)
-        self.loss = WeightSumLoss(weight=self.arg.aux_weight).cuda(output_device)
+        self.loss = WeightSumLoss(
+            weight=self.arg.aux_weight,
+            focal_gamma=self.arg.focal_gamma
+        ).cuda(output_device)
 
         if self.arg.weights:
             self.global_step = int(arg.weights[:-3].split('-')[-1])
@@ -410,6 +470,8 @@ class Processor():
         self.adjust_learning_rate(epoch)
 
         loss_value = []
+        loss_main_value = []
+        loss_aux_value = []
         acc_value = []
         self.train_writer.add_scalar('epoch', epoch, self.global_step)
         self.record_time()
@@ -425,13 +487,15 @@ class Processor():
 
             # forward
             output, aux_output = self.model(data)
-            loss = self.loss(output, aux_output , label)
+            loss, loss_main, loss_aux = self.loss.forward_with_components(output, aux_output, label)
             # backward
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
 
             loss_value.append(loss.data.item())
+            loss_main_value.append(loss_main.data.item())
+            loss_aux_value.append(loss_aux.data.item())
             timer['model'] += self.split_time()
 
             value, predict_label = torch.max(output.data, 1)
@@ -439,6 +503,8 @@ class Processor():
             acc_value.append(acc.data.item())
             self.train_writer.add_scalar('acc', acc, self.global_step)
             self.train_writer.add_scalar('loss', loss.data.item(), self.global_step)
+            self.train_writer.add_scalar('loss_main', loss_main.data.item(), self.global_step)
+            self.train_writer.add_scalar('loss_aux', loss_aux.data.item(), self.global_step)
 
             # statistics
             self.lr = self.optimizer.param_groups[0]['lr']
@@ -451,8 +517,15 @@ class Processor():
             for k, v in timer.items()
         }
         self.print_log(
-            '\tMean training loss: {:.4f}.  Mean training acc: {:.2f}%.'.format(np.mean(loss_value), np.mean(acc_value)*100))
+            '\tMean training loss: {:.4f} (main={:.4f}, aux={:.4f}).  Mean training acc: {:.2f}%.'.format(
+                np.mean(loss_value), np.mean(loss_main_value), np.mean(loss_aux_value),
+                np.mean(acc_value) * 100))
         self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
+        # Epoch-level summaries
+        self.train_writer.add_scalar('epoch_loss', np.mean(loss_value), epoch)
+        self.train_writer.add_scalar('epoch_loss_main', np.mean(loss_main_value), epoch)
+        self.train_writer.add_scalar('epoch_loss_aux', np.mean(loss_aux_value), epoch)
+        self.train_writer.add_scalar('epoch_acc', np.mean(acc_value), epoch)
 
         if save_model:
             state_dict = self.model.state_dict()
@@ -498,7 +571,8 @@ class Processor():
                             f_w.write(str(index[i]) + ',' + str(x) + ',' + str(true[i]) + '\n')
             score = np.concatenate(score_frag)
             loss = np.mean(loss_value)
-            if 'ucla' in self.arg.feeder:
+            # Generic check: set sample_name if feeder doesn't provide it (e.g. UCLA feeder)
+            if not hasattr(self.data_loader[ln].dataset, 'sample_name'):
                 self.data_loader[ln].dataset.sample_name = np.arange(len(score))
             accuracy = self.data_loader[ln].dataset.top_k(score, 1)
             if accuracy > self.best_acc:
@@ -517,6 +591,9 @@ class Processor():
             for k in self.arg.show_topk:
                 self.print_log('\tTop{}: {:.2f}%'.format(
                     k, 100 * self.data_loader[ln].dataset.top_k(score, k)))
+            # Top-3 accuracy (always compute regardless of show_topk)
+            top3_acc = self.data_loader[ln].dataset.top_k(score, 3)
+            self.print_log('\tTop3: {:.2f}%'.format(100 * top3_acc))
 
             if save_score:
                 with open('{}/epoch{}_{}_score.pkl'.format(
@@ -530,8 +607,24 @@ class Processor():
             list_diag = np.diag(confusion)
             list_raw_sum = np.sum(confusion, axis=1)
             each_acc = list_diag / list_raw_sum
+
+            # Mean class accuracy (balanced accuracy, important for imbalanced datasets)
+            mean_class_acc = np.mean(each_acc)
+            self.print_log('\tMean class accuracy: {:.2f}%'.format(100 * mean_class_acc))
+            if self.arg.phase == 'train':
+                self.val_writer.add_scalar('mean_class_acc', mean_class_acc, self.global_step)
+
+            # Per-class accuracy printout with class names if available
+            class_names = getattr(self.arg, 'class_names', None)
+            if class_names is None:
+                class_names = [str(i) for i in range(len(each_acc))]
+            for cls_name, cls_acc in zip(class_names, each_acc):
+                self.print_log('\t  {:30s}: {:.2f}%'.format(cls_name, 100 * cls_acc))
+
+            # Save per-class CSV with class name header row
             with open('{}/epoch{}_{}_each_class_acc.csv'.format(self.arg.work_dir, epoch + 1, ln), 'w') as f:
                 writer = csv.writer(f)
+                writer.writerow(class_names)  # header row with class names
                 writer.writerow(each_acc)
                 writer.writerows(confusion)
 
