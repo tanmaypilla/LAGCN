@@ -298,7 +298,7 @@ class TCN_GCN_unit(nn.Module):
 
 class Model(nn.Module):
     def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, graph_args=dict(), examplar=None, examplar_args=dict(), in_channels=3,
-                 drop_out=0, adaptive=True):
+                 drop_out=0, adaptive=True, temporal_cpr=False):
         super(Model, self).__init__()
 
         if graph is None:
@@ -331,6 +331,7 @@ class Model(nn.Module):
         self.l8 = TCN_GCN_unit(base_channel*4, base_channel*4, A, adaptive=adaptive, loop_times=0)
         self.l9 = TCN_GCN_unit(base_channel*4, base_channel*4, A, adaptive=adaptive, loop_times=0)
 
+        self.temporal_cpr = temporal_cpr
         self.fc = nn.Linear(base_channel*4, num_class)
         self.aux_fc = nn.Conv2d(base_channel*4, 1, 1, 1)
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -369,10 +370,16 @@ class Model(nn.Module):
         c_new = x.size(1)
 
         # aux branch
-        # N * M, C, T, V -> N * M, C, V
-        aux_x = x.mean(2)
-        # N * M, C, V -> N * M, C, n_cls, V
-        aux_x = torch.einsum('nmv,cvu->nmcu', aux_x, self.examplar)
+        if self.temporal_cpr:
+            # Apply CPR at every timestep, then mean-pool over T
+            # (N*M, C, T, V) x (ncls, V, V) -> (N*M, C, T, ncls, V) -> (N*M, C, ncls, V)
+            aux_x = torch.einsum('bdtv,cvu->bdtcu', x, self.examplar).mean(2)
+        else:
+            # Original: mean-pool over T first, then apply CPR
+            # N * M, C, T, V -> N * M, C, V
+            aux_x = x.mean(2)
+            # N * M, C, V -> N * M, C, n_cls, V
+            aux_x = torch.einsum('nmv,cvu->nmcu', aux_x, self.examplar)
         #  N * M, C, n_cls, V ->  N * M, n_cls, V
         aux_x = self.aux_fc(aux_x)
         aux_x = aux_x.squeeze(1)
