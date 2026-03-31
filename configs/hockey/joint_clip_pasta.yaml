@@ -1,0 +1,66 @@
+work_dir: ./work_dir/hockey/joint_clip_pasta
+
+# feeder
+feeder: feeders.feeder_hockey.Feeder
+train_feeder_args:
+  data_path: /data/skating_actions_dataset/annotations/train.pkl
+  split: train
+  window_size: 64
+  p_interval: [0.5, 1]
+  random_rot: False
+  bone: False
+  vel: False
+  debug: False
+
+test_feeder_args:
+  data_path: /data/skating_actions_dataset/annotations/test.pkl
+  split: test
+  window_size: 64
+  p_interval: [0.95]
+  bone: False
+  vel: False
+  debug: False
+
+# model
+model: model.lagcn.Model
+model_args:
+  num_class: 11
+  num_point: 20
+  num_person: 1
+  in_channels: 2
+  graph: graph.hockey.Graph
+  graph_args:
+    labeling_mode: 'spatial'
+  examplar: graph.cls_examplar.CLSExamplar
+  examplar_args:
+    topo_str: "clip_pasta_grounded_[C]_[J]-with-punctuation"
+    base_dir: cls_matrix_hockey
+
+# optim
+weight_decay: 0.0004
+base_lr: 0.1
+lr_decay_rate: 0.1
+step: [35, 55]
+
+# training
+device: 1
+batch_size: 64
+test_batch_size: 64
+num_epoch: 65
+nesterov: True
+warm_up_epoch: 5
+aux_weight: 0.2
+force_rerun: True
+
+class_names:
+  - "GLID_FORW"
+  - "ACCEL_FORW"
+  - "GLID_BACK"
+  - "ACCEL_BACK"
+  - "TRANS_FORW_TO_BACK"
+  - "TRANS_BACK_TO_FORW"
+  - "POST_WHISTLE_GLIDING"
+  - "FACEOFF_BODY_POSITION"
+  - "MAINTAIN_POSITION"
+  - "PRONE"
+  - "ON_A_KNEE"
