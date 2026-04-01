@@ -127,9 +127,13 @@ def extract_features(model, loader, device):
 
     with torch.no_grad():
         for data, label, _ in loader:
-            data  = data.float().to(device)
+            if isinstance(data, (list, tuple)):
+                data = [d.float().to(device) for d in data]
+                main_out, _ = model(*data)
+            else:
+                data = data.float().to(device)
+                main_out, _ = model(data)
             label = label.long()
-            main_out, _ = model(data)
             preds = main_out.argmax(dim=1).cpu()
             feats_list.append(captured['feat'].numpy())
             labels_list.append(label.numpy())

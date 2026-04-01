@@ -481,12 +481,18 @@ class Processor():
         for batch_idx, (data, label, index) in enumerate(process):
             self.global_step += 1
             with torch.no_grad():
-                data = data.float().cuda(self.output_device)
+                if isinstance(data, (list, tuple)):
+                    data = [d.float().cuda(self.output_device) for d in data]
+                else:
+                    data = data.float().cuda(self.output_device)
                 label = label.long().cuda(self.output_device)
             timer['dataloader'] += self.split_time()
 
             # forward
-            output, aux_output = self.model(data)
+            if isinstance(data, (list, tuple)):
+                output, aux_output = self.model(*data)
+            else:
+                output, aux_output = self.model(data)
             loss, loss_main, loss_aux = self.loss.forward_with_components(output, aux_output, label)
             # backward
             self.optimizer.zero_grad()
@@ -550,9 +556,15 @@ class Processor():
             for batch_idx, (data, label, index) in enumerate(process):
                 label_list.append(label)
                 with torch.no_grad():
-                    data = data.float().cuda(self.output_device)
+                    if isinstance(data, (list, tuple)):
+                        data = [d.float().cuda(self.output_device) for d in data]
+                    else:
+                        data = data.float().cuda(self.output_device)
                     label = label.long().cuda(self.output_device)
-                    output, aux_output = self.model(data)
+                    if isinstance(data, (list, tuple)):
+                        output, aux_output = self.model(*data)
+                    else:
+                        output, aux_output = self.model(data)
                     loss = self.loss(output, aux_output , label)
                     score_frag.append(output.data.cpu().numpy())
                     loss_value.append(loss.data.item())

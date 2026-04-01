@@ -6,7 +6,7 @@ from feeders import tools
 
 class Feeder(Dataset):
     def __init__(self, data_path, split='train', p_interval=1, window_size=64,
-                 random_rot=False, bone=False, vel=False, debug=False):
+                 random_rot=False, bone=False, vel=False, dual_stream=False, debug=False):
         """
         Hockey Skating Actions dataset feeder for LAGCN.
 
@@ -26,6 +26,7 @@ class Feeder(Dataset):
         self.random_rot = random_rot
         self.bone = bone
         self.vel = vel
+        self.dual_stream = dual_stream
         self.debug = debug
         self.load_data()
 
@@ -132,6 +133,12 @@ class Feeder(Dataset):
             for v1, v2 in bone_pairs.hockey_pairs:
                 bone_data_numpy[:, :, v1] = data_numpy[:, :, v1] - data_numpy[:, :, v2]
             data_numpy = bone_data_numpy
+
+        if self.dual_stream:
+            data_motion = data_numpy.copy()
+            data_motion[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]
+            data_motion[:, -1] = 0
+            return (data_numpy, data_motion), label, index
 
         if self.vel:
             data_numpy[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]

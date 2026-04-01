@@ -563,6 +563,58 @@ Even with CLIP, the core structural problems (single-person skeleton, missing ri
 
 **Conclusion:** Velocity stream is a net loss as a standalone. It is complementary to the joint stream but cannot replace it.
 
+### 12.4 Joint + Motion Fusion Results
+
+**Run:** `work_dir/hockey/joint_motion_fusion_CUDNN` | 65 epochs | LR schedule: 0.1 → 0.01 at epoch 35 → 0.001 at epoch 55
+
+#### Overall
+
+| Metric | Baseline | Fusion (best, ep57) | Fusion (final, ep65) |
+|---|---|---|---|
+| Top1 | 78.25% | **80.34%** (+2.09pp) | 79.34% (+1.09pp) |
+| Top3 | — | 95.36% | 95.06% |
+| Top5 | — | 98.62% | 98.29% |
+| Mean class acc | — | **59.05%** | 56.91% |
+| Train acc | — | — | 91.64% |
+
+#### Per-class at best checkpoint (epoch 57)
+
+| Class | Baseline | Fusion (ep57) | Δ |
+|---|---|---|---|
+| GLID_FORW | 83.2% | 85.61% | +2.4pp |
+| ACCEL_FORW | 86.3% | 87.90% | +1.6pp |
+| GLID_BACK | 65.9% | 65.37% | ≈0 |
+| ACCEL_BACK | 45.0% | 43.24% | -1.8pp |
+| TRANS_F2B | 71.3% | 63.24% | -8.1pp |
+| TRANS_B2F | — | 42.37% | — |
+| **POST_WHISTLE** | **30.8%** | **52.56%** | **+21.8pp** |
+| FACEOFF | 15.6% | 21.88% | +6.3pp |
+| MAINTAIN | — | 87.39% | — |
+| PRONE | — | 25.00% | — |
+| ON_A_KNEE | — | 75.00% | — |
+
+#### Training dynamics
+
+The run has three distinct phases driven by LR decays:
+
+| Phase | Epochs | LR | Test Top1 | Train acc |
+|---|---|---|---|---|
+| Initial | 1–35 | 0.1 | 70–77% | 73–77% |
+| Post-decay 1 | 36–55 | 0.01 | 78–80% | 80–85% |
+| Post-decay 2 | 56–65 | 0.001 | 79–80% | 88–92% |
+
+Both LR decays produced an immediate jump in test accuracy. The model peaked at epoch 57 (80.34%) then began overfitting: train acc kept climbing to 91.84% while test Top1 drifted back to 79.34% by epoch 65. The train–test gap at the final epoch is ~12pp. An early stop at epoch 57 would have been optimal.
+
+#### Interpretation
+
+The fusion hypothesis is confirmed. **POST_WHISTLE gained +21.8pp** — the largest single-class improvement of any experiment. The motion stream correctly identified the deceleration-into-stillness signature that is invisible in raw coordinates. FACEOFF also improved +6.3pp for the same reason.
+
+Direction-sensitive classes are a mixed picture. GLID_BACK is essentially recovered (≈0 vs. the -20pp collapse of the standalone velocity stream), confirming the gate learned to suppress the motion stream for this class. However, TRANS_F2B is still -8.1pp below baseline and ACCEL_BACK is slightly below — suggesting the gate is not fully suppressing the motion stream for all direction-sensitive classes, or the shared training signal is slightly shifting the joint backbone away from the direction-encoding representation.
+
+**FACEOFF and PRONE remain structural limitations.** FACEOFF at 21.88% is better than baseline (15.6%) but still heavily confused with GLID_FORW in the main branch. Both classes suffer from the skeleton ambiguity identified in the CPR analysis: no additional input stream resolves the core issue that the body posture is indistinguishable from gliding at the GCN feature level.
+
+---
+
 ### 12.3 Why Joint + Motion Fusion Is the Natural Next Step
 
 The results reveal a clear stream-class interaction:
