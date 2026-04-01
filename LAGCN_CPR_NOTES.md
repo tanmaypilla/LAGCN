@@ -529,51 +529,115 @@ Even with CLIP, the core structural problems (single-person skeleton, missing ri
 
 ---
 
-## 12. Solutions and Experiments
+## 12. Experiment Results
 
-### What the Diagnostic Tells Us About Each Approach
+### 12.1 Temporal CPR vs Baseline
 
-| Approach | Post-diagnostic Assessment |
+| Class | Baseline | Temporal CPR | Δ |
+|---|---|---|---|
+| GLID_FORW | 83.2% / 0.771 | 83.6% / 0.769 | ≈0 |
+| ACCEL_FORW | 86.3% / 0.804 | 87.0% / 0.805 | +0.7pp |
+| GLID_BACK | 65.9% / 0.536 | 64.4% / 0.523 | -1.5pp |
+| POST_WHISTLE | 30.8% / 0.182 | **17.9% / 0.150** | **-12.9pp** |
+| FACEOFF | 15.6% / 0.089 | 14.1% / 0.070 | -1.5pp |
+| **Overall** | **78.25%** | **78.05%** | -0.2pp |
+
+**Result: no meaningful improvement.** Temporal CPR held overall accuracy flat but hurt POST_WHISTLE badly (-12.9pp). The explanation is confirmed by the theory: temporal CPR can only amplify discriminative signal that already exists in the per-frame features. Since CPR[FACEOFF] and CPR[POST_WHISTLE] are nearly flat/uniform, applying them per-timestep vs. once on the time-average makes no practical difference — the CPR weights are still uniform so no temporal moment is emphasized over another. The POST_WHISTLE regression suggests that at certain timesteps the joint pattern briefly resembles another class's CPR, and that noise accumulates when pooled over 16 frames of CPR-filtered activations.
+
+**Conclusion:** Temporal CPR is only useful in conjunction with either better CPR matrices (less flat for event classes) or better input features — not as a standalone change.
+
+### 12.2 Velocity Stream vs Baseline
+
+| Class | Baseline | Velocity stream | Δ |
+|---|---|---|---|
+| GLID_FORW | 83.2% / 0.771 | 83.5% / 0.729 | ≈0 |
+| ACCEL_FORW | 86.3% / 0.804 | 85.3% / 0.782 | -1.0pp |
+| GLID_BACK | 65.9% / 0.536 | **45.9% / 0.377** | **-20pp** |
+| ACCEL_BACK | 45.0% / 0.414 | **31.5% / 0.289** | **-13.5pp** |
+| TRANS_F2B | 71.3% / 0.643 | 59.6% / 0.550 | -11.7pp |
+| POST_WHISTLE | 30.8% / 0.182 | 29.5% / **0.262** | +0.5pp acc / +44% purity |
+| FACEOFF | 15.6% / 0.089 | **23.4% / 0.100** | **+7.8pp** |
+| **Overall** | **78.25%** | **75.76%** | **-2.5pp** |
+
+**Result: the only change that moved FACEOFF, but at a heavy cost.** FACEOFF accuracy improved +7.8pp and POST_WHISTLE kNN purity jumped from 0.182 → 0.262 (the largest purity gain of any class). The velocity signal encodes deceleration into a faceoff stance and the stillness of post-whistle gliding — both invisible in raw coordinates. However, the direction-sensitive classes collapsed badly: GLID_BACK lost 20pp, ACCEL_BACK lost 13.5pp, TRANS_F2B lost 11.7pp. These classes discriminate forward vs. backward and acceleration direction from the trajectory of joint positions over time — information that is destroyed when you replace absolute coordinates with frame-to-frame deltas.
+
+**Conclusion:** Velocity stream is a net loss as a standalone. It is complementary to the joint stream but cannot replace it.
+
+### 12.3 Why Joint + Motion Fusion Is the Natural Next Step
+
+The results reveal a clear stream-class interaction:
+
+| Stream | Good for | Poor for |
+|---|---|---|
+| Joint (coordinates) | GLID_BACK, ACCEL_BACK, TRANS_F2B, TRANS_B2F | FACEOFF, POST_WHISTLE |
+| Motion (velocity) | FACEOFF, POST_WHISTLE | GLID_BACK, ACCEL_BACK, TRANS_F2B |
+
+No single stream handles all classes well because different classes are defined by different types of signal:
+- **Motion-defined classes** (GLID_BACK, ACCEL_BACK, TRANS): the *direction* and *rate* of motion encodes the class. Raw coordinates carry this as trajectory.
+- **Event-defined classes** (FACEOFF, POST_WHISTLE): the class is defined by a specific *moment of transition* — deceleration into stillness, or drift after a whistle. Velocity directly encodes this; coordinates do not.
+
+Running both streams through independent backbones and fusing their `(N*M, 256, 16, 20)` feature maps allows the model to use whichever stream is more informative for each class. A gated fusion mechanism learns this class-stream interaction end-to-end: for GLID_BACK samples it learns to weight the joint stream heavily; for FACEOFF samples it learns to weight the motion stream.
+
+The CPR aux branch remains on the joint stream only — exemplar matrices encode positional joint co-activation priors derived from text descriptions of body postures, which is meaningless when applied to velocity features.
+
+---
+
+## 13. Joint + Motion Fusion Implementation
+
+### Architecture
+
+```
+Joint input  (N, 2, 64, 20, 1) ──→ joint_l1...joint_l9 ──→ (N*M, 256, 16, 20) ──┐
+                                                                                    ├─→ StreamFusion(gate) ─→ (N*M, 256, 16, 20) ─→ FC ─→ main logits
+Motion input (N, 2, 64, 20, 1) ──→ motion_l1...motion_l9 ─→ (N*M, 256, 16, 20) ──┘
+                    ↑
+           joint features also feed CPR aux branch ─→ aux logits (N, 11)
+```
+
+**StreamFusion (gate mode):**
+```
+gate = sigmoid(BN(ReLU(Conv2d(512→256, 1×1))) applied to cat([joint, motion]))
+output = gate × joint_features + (1 − gate) × motion_features
+```
+The gate learns a per-channel blend ratio. For GLID_BACK, the gate saturates toward the joint stream; for FACEOFF, toward the motion stream. This is learned automatically from the classification loss — no explicit supervision on stream selection is needed.
+
+### Files
+
+| File | Change |
 |---|---|
-| **Per-class aux weight** | Still valid — prevents flat-CPR noise from polluting gradients. Low cost, stack with everything. Won't fix the feature problem alone. |
-| **Better text templates** | Only useful once features improve. If velocity stream gives the GCN better FACEOFF features, a better CPR amplifies that. |
-| **Learnable CPR for flat classes** | Same — useful as a follow-on once features separate. |
-| **Temporal CPR** | Attacks a different dimension — the time-averaging problem, independent of CPR quality. Implemented. |
-| **Velocity stream** | Most direct fix — frame-to-frame joint displacements directly encode deceleration into a stop, separating FACEOFF from GLID_FORW at the input level. |
+| `model/lagcn_fusion.py` | New — `StreamFusion` module + `FusionModel` class |
+| `feeders/feeder_hockey.py` | Added `dual_stream=False` flag; returns `(joint, motion)` tuple when True |
+| `main.py` | `self.model(*data)` dispatch when data is a tuple |
+| `configs/hockey/joint_motion_fusion.yaml` | New config — `batch_size: 32`, `dual_stream: True`, `fusion_mode: gate` |
 
-### Priority Order
+`model/lagcn.py` and all existing single-stream configs are untouched.
 
-```
-1. Velocity stream training          ← fixes the input signal
-2. Temporal CPR                      ← fixes how aux branch uses the signal  
-3. Per-class aux weight              ← low cost, stackable
-4. Better templates / learnable CPR  ← fixes CPR flatness; most useful after 1+2
-```
+### Dual Stream Feeder
 
-### Temporal CPR Implementation
-
-The change is in `model/lagcn.py`, controlled by the `temporal_cpr` flag in `model_args`:
+When `dual_stream=True`, the feeder applies normalization and temporal crop once, then derives the motion stream internally:
 
 ```python
-# __init__ addition:
-self.temporal_cpr = temporal_cpr
-
-# forward — aux branch:
-if self.temporal_cpr:
-    # Apply CPR at every timestep, then mean-pool over T
-    # (N*M, C, T, V) × (ncls, V, V) → (N*M, C, T, ncls, V) → (N*M, C, ncls, V)
-    aux_x = torch.einsum('bdtv,cvu->bdtcu', x, self.examplar).mean(2)
-else:
-    # Original static path
-    aux_x = x.mean(2)
-    aux_x = torch.einsum('nmv,cvu->nmcu', aux_x, self.examplar)
+data_motion = data_numpy.copy()
+data_motion[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]
+data_motion[:, -1] = 0
+return (data_numpy, data_motion), label, index
 ```
 
-Both paths produce `(N*M, 256, num_classes, V)` — downstream `aux_fc` is unchanged. Config: `configs/hockey/joint_temporal_cpr.yaml`.
+Both streams see identical crop and normalization — the velocity is derived from the already-processed joint positions so there is no misalignment between streams.
 
-### Velocity Stream
+### Training
 
-Config already exists at `configs/hockey/joint_motion.yaml` with `vel: True`. The feeder computes frame-to-frame joint displacements: `data[:, :-1] = data[:, 1:] - data[:, :-1]`, replacing absolute coordinates with velocity vectors. This directly encodes *how fast* each joint is moving at each frame — the deceleration into a faceoff crouch, the stillness of post-whistle, etc.
+Run:
+```bash
+python main.py --config configs/hockey/joint_motion_fusion.yaml
+```
+
+To warm-start from pretrained single-stream checkpoints (recommended):
+```python
+model.load_pretrained_tower('work_dir/hockey/joint_CUDNN/runs-65-20800.pt', 'joint_tower')
+model.load_pretrained_tower('work_dir/hockey/joint_motion_CUDNN/runs-65-20800.pt', 'motion_tower')
+```
+The `StreamFusion` gate is the only component that trains from scratch. The backbone towers fine-tune from their respective pretrained weights.
 
 ### Running Experiments
 
@@ -583,6 +647,9 @@ python main.py --config configs/hockey/joint_motion.yaml
 
 # Temporal CPR
 python main.py --config configs/hockey/joint_temporal_cpr.yaml
+
+# Joint + motion fusion
+python main.py --config configs/hockey/joint_motion_fusion.yaml
 
 # Diagnostic on any trained model
 python diagnose_features.py \
@@ -608,6 +675,8 @@ python diagnose_features.py \
 | `configs/hockey/joint_temporal_cpr.yaml` | Temporal CPR config |
 | `configs/hockey/joint_clip_pasta.yaml` | CLIP PASTA-grounded CPR config |
 | `configs/hockey/joint_clip_natural.yaml` | CLIP natural description CPR config |
+| `configs/hockey/joint_motion_fusion.yaml` | Joint + motion fusion config |
+| `model/lagcn_fusion.py` | Two-tower fusion model with gated stream fusion |
 | `diagnose_features.py` | Feature-space diagnostic: t-SNE, kNN purity, confusion matrix |
 | `visualize_cpr.py` | CPR visualization: heatmaps, PCA, inter-class similarity |
 | `LAGCN_CPR_NOTES.md` | This document |
