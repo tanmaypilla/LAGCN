@@ -6,3 +6,6 @@ data/NW-UCLA/all_sqe
 data/NW-UCLA/all_sqe.zip
 # default workdir
 work_dir/
+# for hockey dataset annotations and visualization
+data/annotations/ 
+viz_*/ 
