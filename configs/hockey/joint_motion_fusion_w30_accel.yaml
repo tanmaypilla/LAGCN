@@ -1,28 +1,28 @@
-work_dir: ./work_dir/hockey/joint_temporal_cpr
+work_dir: ./work_dir/hockey/joint_motion_fusion_w30_accel
 
-# feeder
 feeder: feeders.feeder_hockey.Feeder
 train_feeder_args:
   data_path: /home/tanmay-ura/LAGCN/data/annotations/train.pkl
   split: train
-  window_size: 64
-  p_interval: [0.5, 1]
+  window_size: 30
+  p_interval: [0.75, 1]
   random_rot: False
   bone: False
   vel: False
+  dual_stream: True
   debug: False
 
 test_feeder_args:
   data_path: /home/tanmay-ura/LAGCN/data/annotations/test.pkl
   split: test
-  window_size: 64
+  window_size: 30
   p_interval: [0.95]
   bone: False
   vel: False
+  dual_stream: True
   debug: False
 
-# model
-model: model.lagcn.Model
+model: model.lagcn_fusion.FusionModel
 model_args:
   num_class: 11
   num_point: 20
@@ -35,18 +35,18 @@ model_args:
   examplar_args:
     topo_str: "when_[C]_[J]_of_hockey_player-with-punctuation"
     base_dir: cls_matrix_hockey
-  temporal_cpr: True
+  fusion_mode: gate
+  temporal_cpr: False
+  motion_in_channels: 4
 
-# optim
 weight_decay: 0.0004
 base_lr: 0.1
 lr_decay_rate: 0.1
 step: [35, 55]
 
-# training
 device: 0
-batch_size: 64
-test_batch_size: 64
+batch_size: 32
+test_batch_size: 32
 num_epoch: 65
 nesterov: True
 warm_up_epoch: 5

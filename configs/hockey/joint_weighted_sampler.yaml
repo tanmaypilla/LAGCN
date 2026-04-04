@@ -2,7 +2,7 @@ work_dir: ./work_dir/hockey/joint_weighted_sampler
 
 feeder: feeders.feeder_hockey.Feeder
 train_feeder_args:
-  data_path: /data/skating_actions_dataset/annotations/train.pkl
+  data_path: /home/tanmay-ura/LAGCN/data/annotations/train.pkl
   split: train
   window_size: 64
   p_interval: [0.5, 1]
@@ -12,7 +12,7 @@ train_feeder_args:
   debug: False
 
 test_feeder_args:
-  data_path: /data/skating_actions_dataset/annotations/test.pkl
+  data_path: /home/tanmay-ura/LAGCN/data/annotations/test.pkl
   split: test
   window_size: 64
   p_interval: [0.95]
