@@ -95,7 +95,7 @@ data = data[:, bias:bias+cropped_length, :, :]
 
 Two distinct purposes:
 
-- **Variable-length handling:** Hockey clips vary from ~30 to ~200 frames. The model requires a fixed-size input tensor, so all clips are resampled to exactly 64 frames via bilinear interpolation (temporal resampling).
+- **Variable-length handling:** Hockey clips vary from 15 to 30 frames. The model requires a fixed-size input tensor, so all clips are resampled to exactly 64 frames via bilinear interpolation (temporal resampling).
 - **Data augmentation (train only):** Randomly cropping a fraction `p ∈ [p_min, p_max]` of the clip starting from a random offset forces the model to recognize actions from partial views, prevents over-reliance on clip boundaries, and multiplies the effective dataset size. At test time a deterministic center crop is used instead.
 
 ---
