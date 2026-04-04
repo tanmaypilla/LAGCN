@@ -138,7 +138,10 @@ class Feeder(Dataset):
             data_motion = data_numpy.copy()
             data_motion[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]
             data_motion[:, -1] = 0
-            return (data_numpy, data_motion), label, index
+            data_accel = np.zeros_like(data_motion)
+            data_accel[:, 1:-1] = data_motion[:, 2:] - data_motion[:, 1:-1]
+            motion_stream = np.concatenate([data_motion, data_accel], axis=0)  # (4, T, V, M)
+            return (data_numpy, motion_stream), label, index
 
         if self.vel:
             data_numpy[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]

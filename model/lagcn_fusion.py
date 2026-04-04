@@ -148,6 +148,7 @@ class FusionModel(nn.Module):
         examplar=None,
         examplar_args: dict = dict(),
         in_channels: int = 3,
+        motion_in_channels: int = None,
         drop_out: float = 0,
         adaptive: bool = True,
         temporal_cpr: bool = False,
@@ -188,8 +189,9 @@ class FusionModel(nn.Module):
         )
         bn_init(self.joint_tower['data_bn'], 1)
 
-        # Motion tower
-        self.motion_tower = _build_tower(in_channels, num_point, num_person, A, adaptive)
+        # Motion tower (may have more input channels, e.g. velocity + acceleration)
+        _motion_in = motion_in_channels if motion_in_channels is not None else in_channels
+        self.motion_tower = _build_tower(_motion_in, num_point, num_person, A, adaptive)
         self.motion_pos_embedding = nn.Parameter(
             torch.randn(1, num_point, base_channel)
         )
