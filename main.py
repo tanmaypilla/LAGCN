@@ -229,6 +229,15 @@ def get_parser():
         '--use-weighted-sampler', type=str2bool, default=False,
         help='use WeightedRandomSampler to balance class frequencies during training')
     parser.add_argument(
+        '--use-balanced-sampler', type=str2bool, default=False,
+        help='use BalancedBatchSampler so each batch has equal samples per class')
+    parser.add_argument(
+        '--class-weights',
+        type=float,
+        default=None,
+        nargs='+',
+        help='per-class weights for CrossEntropyLoss (length must equal num_class)')
+    parser.add_argument(
         '--focal-gamma', type=float, default=0.0,
         help='gamma for focal loss (0 = standard CrossEntropy, 2.0 = standard focal)')
 
@@ -249,14 +258,14 @@ class FocalLoss(nn.Module):
 
 
 class WeightSumLoss(nn.Module):
-    def __init__(self, weight=0.1, focal_gamma=0.0):
+    def __init__(self, weight=0.1, focal_gamma=0.0, class_weights=None):
         super().__init__()
         self.weight = weight
 
         if focal_gamma > 0:
             self.loss = FocalLoss(gamma=focal_gamma)
         else:
-            self.loss = nn.CrossEntropyLoss()
+            self.loss = nn.CrossEntropyLoss(weight=class_weights)
         # aux branch always uses standard CE (CPR is a structural prior, not classification)
         self.aux_loss = nn.CrossEntropyLoss()
 
@@ -324,7 +333,22 @@ class Processor():
         self.data_loader = dict()
         if self.arg.phase == 'train':
             train_dataset = Feeder(**self.arg.train_feeder_args)
-            if self.arg.use_weighted_sampler:
+            if self.arg.use_balanced_sampler:
+                from feeders.balanced_sampler import BalancedBatchSampler
+                balanced_sampler = BalancedBatchSampler(
+                    train_dataset.label,
+                    batch_size=self.arg.batch_size,
+                    drop_last=True,
+                )
+                self.print_log(f'BalancedBatchSampler: {balanced_sampler.num_classes} classes, '
+                               f'{balanced_sampler.samples_per_class} samples/class, '
+                               f'batch_size={self.arg.batch_size}')
+                self.data_loader['train'] = torch.utils.data.DataLoader(
+                    dataset=train_dataset,
+                    batch_sampler=balanced_sampler,
+                    num_workers=self.arg.num_worker,
+                    worker_init_fn=init_seed)
+            elif self.arg.use_weighted_sampler:
                 labels = np.array(train_dataset.label)
                 class_counts = np.bincount(labels)
                 # inverse-frequency weight per sample; rare classes sampled more often
@@ -365,9 +389,13 @@ class Processor():
         print(Model)
         self.model = Model(**self.arg.model_args)
         print(self.model)
+        class_weights = None
+        if self.arg.class_weights is not None:
+            class_weights = torch.tensor(self.arg.class_weights, dtype=torch.float).cuda(output_device)
         self.loss = WeightSumLoss(
             weight=self.arg.aux_weight,
-            focal_gamma=self.arg.focal_gamma
+            focal_gamma=self.arg.focal_gamma,
+            class_weights=class_weights,
         ).cuda(output_device)
 
         if self.arg.weights:
