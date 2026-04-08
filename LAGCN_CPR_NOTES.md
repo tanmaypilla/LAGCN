@@ -615,6 +615,105 @@ Direction-sensitive classes are a mixed picture. GLID_BACK is essentially recove
 
 ---
 
+### 12.5 Data Split Fix (combined_annotations_v2)
+
+Before continuing with new runs, the test split was found to be incorrect. The original `test.pkl` (Jan 7) had only 64 FACEOFF test samples; the correct v2 split has 111. The v2 split files were generated from `combined_annotations_v2.pkl` and stored locally:
+
+All configs updated to point to `data/annotations/`. All results from section 12.6 onward use the corrected split.
+
+---
+
+### 12.6 Fusion + T=30 Window (correct split, no accel)
+
+**Run:** `work_dir/hockey/joint_motion_fusion_w30_CUDNN` | 65 epochs | correct v2 split | `window_size=30`, `p_interval=[0.75,1]`, `motion_in_channels=2`
+
+Key changes from section 12.4: window reduced from 64→30 (matching dataset max), crop lower bound raised 0.5→0.75 to avoid cropping out transition moments.
+
+| Metric | Value |
+|---|---|
+| **Best Top1 (ep37)** | **80.92%** |
+| Mean class acc (ep37) | 55.37% |
+| Final epoch (65) Top1 | 79.31% |
+| Train acc (final) | 96.53% |
+
+Per-class at best epoch (37):
+
+| Class | Acc | n |
+|---|---|---|
+| GLID_FORW | 87.1% | 2356 |
+| ACCEL_FORW | 87.8% | 1942 |
+| GLID_BACK | 65.9% | 410 |
+| ACCEL_BACK | 39.6% | 111 |
+| TRANS_F2B | 66.9% | 136 |
+| TRANS_B2F | 37.3% | 118 |
+| POST_WHISTLE | 48.7% | 78 |
+| **FACEOFF** | **71.2%** | 111 |
+| MAINTAIN | 28.4% | 88 |
+| PRONE | 58.3% | 12 |
+| ON_A_KNEE | 0.0% | 21 |
+
+FACEOFF jumping to 71.2% (from 21.9% on old split) is the direct effect of the corrected training data — the new train split has 702 FACEOFF samples vs far fewer in the old split. Best epoch is 37 (immediately after first LR decay at step 35). The model peaks early and overfits heavily in phase 3 (train 96.5% vs test 79.3% at epoch 65, a 17pp gap).
+
+---
+
+### 12.7 Fusion + T=30 + Acceleration Channel
+
+**Run:** `work_dir/hockey/joint_motion_fusion_w30_accel_CUDNN` | 65 epochs | correct v2 split | `window_size=30`, `p_interval=[0.75,1]`, `motion_in_channels=4`
+
+New addition: acceleration stream (second-order delta) concatenated as channels 3–4 of the motion stream. The motion tower now receives `(N, 4, T, V, M)` — channels 1–2 are frame-to-frame velocity (Δxy), channels 3–4 are the delta of velocity (Δ²xy). Only `motion_in_channels` in `FusionModel` and the feeder's `dual_stream` block changed; architecture is otherwise identical.
+
+#### Overall
+
+| Metric | w30 no-accel (ep37) | **w30 + accel (ep39)** | Δ |
+|---|---|---|---|
+| **Best Top1** | 80.92% | **81.37%** | +0.45pp |
+| Mean class acc | 55.37% | 58.36% | +2.99pp |
+| Final epoch Top1 | 79.31% | 79.42% | ≈0 |
+| Train acc (final) | 96.53% | 95.94% | ≈0 |
+
+#### Per-class at best epoch (39)
+
+| Class | w30 no-accel | w30 + accel | Δ | n |
+|---|---|---|---|---|
+| GLID_FORW | 87.1% | 86.3% | -0.8pp | 2356 |
+| ACCEL_FORW | 87.8% | 88.2% | +0.4pp | 1942 |
+| GLID_BACK | 65.9% | 64.9% | -1.0pp | 410 |
+| **ACCEL_BACK** | **39.6%** | **58.6%** | **+19.0pp** | 111 |
+| **TRANS_F2B** | **66.9%** | **72.1%** | **+5.2pp** | 136 |
+| TRANS_B2F | 37.3% | 44.9% | +7.6pp | 118 |
+| POST_WHISTLE | 48.7% | 34.6% | -14.1pp | 78 |
+| **FACEOFF** | **71.2%** | **82.9%** | **+11.7pp** | 111 |
+| MAINTAIN | 28.4% | 25.0% | -3.4pp | 88 |
+| PRONE | 58.3% | 75.0% | +16.7pp | 12 |
+| ON_A_KNEE | 0.0% | 9.5% | +9.5pp | 21 |
+
+#### Interpretation
+
+**ACCEL_BACK +19pp** is the clearest validation of the acceleration channel. ACCEL_BACK requires distinguishing active push-off (increasing velocity) from steady backward glide — the second-order delta directly encodes this as a large positive Δ²xy during push-off and near-zero during glide. ACCEL_FORW, TRANS_F2B, and TRANS_B2F also improved, consistent with the acceleration signal being discriminative wherever a velocity transition occurs.
+
+**FACEOFF +11.7pp (82.9%)** — the deceleration-into-stance signature is strongly captured. With 702 training samples and the accel signal, the model reliably identifies the approach phase.
+
+**POST_WHISTLE -14.1pp is the key regression.** 44 of 78 POST_WHISTLE samples are predicted as GLID_FORW. Post-whistle gliding has near-zero second derivative (passive slowdown), which overlaps with near-zero acceleration of steady gliding. The channel that helps ACCEL_BACK actively hurts POST_WHISTLE — both have a specific acceleration signature, but POST_WHISTLE's is too similar to gliding at the Δ² level.
+
+**MAINTAIN (25%) and ON_A_KNEE (9.5%)** remain limited by data starvation: 442 and 39 training samples respectively. No stream engineering fixes this.
+
+**TRANS_B2F (44.9%) is structurally harder than TRANS_F2B (72.1%)** — the B2F transition exits into forward acceleration, making the clip's final frames indistinguishable from ACCEL_FORW. 40 of 118 TRANS_B2F samples are predicted as ACCEL_FORW. F2B exits into backward skating, which is less common and more distinctive.
+
+**Precision vs recall asymmetry on FACEOFF:** recall=82.9% but precision=49.5% (92/186 correct predictions). The model triggers on low-crouch postures from ACCEL_FORW and MAINTAIN as false FACEOFF detections.
+
+#### Remaining improvement opportunities
+
+| Class | Issue | Direction |
+|---|---|---|
+| POST_WHISTLE (34.6%) | Accel channel creates false GLID_FORW overlap | Speed magnitude feature; per-class gate weighting |
+| TRANS_B2F (44.9%) | Exit phase identical to ACCEL_FORW | Longer clips or better annotation boundaries |
+| MAINTAIN (25.0%) | Overlaps GLID_FORW and FACEOFF | More training data |
+| GLID_BACK (64.9%) | Forward/backward ambiguity at T=30 | Longer temporal window |
+| FACEOFF precision (49.5%) | False triggers from other low-crouch postures | Hard negative mining |
+| ON_A_KNEE (9.5%) | 39 training samples | More data only |
+
+---
+
 ### 12.3 Why Joint + Motion Fusion Is the Natural Next Step
 
 The results reveal a clear stream-class interaction:
@@ -639,12 +738,14 @@ The CPR aux branch remains on the joint stream only — exemplar matrices encode
 ### Architecture
 
 ```
-Joint input  (N, 2, 64, 20, 1) ──→ joint_l1...joint_l9 ──→ (N*M, 256, 16, 20) ──┐
-                                                                                    ├─→ StreamFusion(gate) ─→ (N*M, 256, 16, 20) ─→ FC ─→ main logits
-Motion input (N, 2, 64, 20, 1) ──→ motion_l1...motion_l9 ─→ (N*M, 256, 16, 20) ──┘
+Joint input  (N, 2, 30, 20, 1) ──→ joint_l1...joint_l9 ──→ (N*M, 256, 8, 20) ──┐
+                                                                                   ├─→ StreamFusion(gate) ─→ (N*M, 256, 8, 20) ─→ FC ─→ main logits
+Motion input (N, 4, 30, 20, 1) ──→ motion_l1...motion_l9 ─→ (N*M, 256, 8, 20) ──┘
                     ↑
            joint features also feed CPR aux branch ─→ aux logits (N, 11)
 ```
+
+Note: `window_size` was originally 64 (T'=16 after two stride-2 layers) and was changed to 30 (T'=8), matching the dataset maximum frame count and eliminating redundant bilinear upsampling. The motion stream was originally 2 channels (velocity Δxy only) and was extended to 4 channels (velocity Δxy + acceleration Δ²xy); see section 12.7.
 
 **StreamFusion (gate mode):**
 ```
@@ -657,25 +758,30 @@ The gate learns a per-channel blend ratio. For GLID_BACK, the gate saturates tow
 
 | File | Change |
 |---|---|
-| `model/lagcn_fusion.py` | New — `StreamFusion` module + `FusionModel` class |
-| `feeders/feeder_hockey.py` | Added `dual_stream=False` flag; returns `(joint, motion)` tuple when True |
+| `model/lagcn_fusion.py` | New — `StreamFusion` module + `FusionModel` class; `motion_in_channels` param added to support different channel counts per tower |
+| `feeders/feeder_hockey.py` | Added `dual_stream=False` flag; returns `(joint, motion_stream)` tuple where `motion_stream` is `(4, T, V, M)` — velocity + acceleration |
 | `main.py` | `self.model(*data)` dispatch when data is a tuple |
-| `configs/hockey/joint_motion_fusion.yaml` | New config — `batch_size: 32`, `dual_stream: True`, `fusion_mode: gate` |
+| `configs/hockey/joint_motion_fusion_w30_accel.yaml` | Active config — `window_size: 30`, `p_interval: [0.75,1]`, `dual_stream: True`, `motion_in_channels: 4`, correct v2 data paths |
 
 `model/lagcn.py` and all existing single-stream configs are untouched.
 
 ### Dual Stream Feeder
 
-When `dual_stream=True`, the feeder applies normalization and temporal crop once, then derives the motion stream internally:
+When `dual_stream=True`, the feeder applies normalization and temporal crop once, then derives both the velocity and acceleration streams internally:
 
 ```python
 data_motion = data_numpy.copy()
-data_motion[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]
+data_motion[:, :-1] = data_numpy[:, 1:] - data_numpy[:, :-1]  # velocity (Δxy)
 data_motion[:, -1] = 0
-return (data_numpy, data_motion), label, index
+
+data_accel = np.zeros_like(data_motion)
+data_accel[:, 1:-1] = data_motion[:, 2:] - data_motion[:, 1:-1]  # acceleration (Δ²xy)
+
+motion_stream = np.concatenate([data_motion, data_accel], axis=0)  # (4, T, V, M)
+return (data_numpy, motion_stream), label, index
 ```
 
-Both streams see identical crop and normalization — the velocity is derived from the already-processed joint positions so there is no misalignment between streams.
+Both streams see identical crop and normalization. Velocity is derived from already-processed joint positions; acceleration is the delta of velocity. Boundary frames (first and last) are zeroed for the acceleration channel. The resulting motion stream is `(4, T, V, M)` — channels 1–2 are Δxy, channels 3–4 are Δ²xy.
 
 ### Training
 
@@ -700,13 +806,13 @@ python main.py --config configs/hockey/joint_motion.yaml
 # Temporal CPR
 python main.py --config configs/hockey/joint_temporal_cpr.yaml
 
-# Joint + motion fusion
-python main.py --config configs/hockey/joint_motion_fusion.yaml
+# Joint + motion fusion with T=30 and acceleration channel (current best)
+python main.py --config configs/hockey/joint_motion_fusion_w30_accel.yaml
 
-# Diagnostic on any trained model
+# Diagnostic on any trained model (supports dual-stream checkpoints)
 python diagnose_features.py \
     --config configs/hockey/<config>.yaml \
-    --checkpoint work_dir/hockey/<run>/runs-65-20800.pt \
+    --checkpoint work_dir/hockey/<run>/runs-<epoch>-<step>.pt \
     --out viz_diagnostic_<name>
 ```
 
@@ -727,8 +833,9 @@ python diagnose_features.py \
 | `configs/hockey/joint_temporal_cpr.yaml` | Temporal CPR config |
 | `configs/hockey/joint_clip_pasta.yaml` | CLIP PASTA-grounded CPR config |
 | `configs/hockey/joint_clip_natural.yaml` | CLIP natural description CPR config |
-| `configs/hockey/joint_motion_fusion.yaml` | Joint + motion fusion config |
-| `model/lagcn_fusion.py` | Two-tower fusion model with gated stream fusion |
+| `configs/hockey/joint_motion_fusion_w30_accel.yaml` | Active config — T=30, velocity+accel motion stream, v2 data split |
+| `configs/hockey/joint_motion_fusion.yaml` | Earlier fusion config (T=30, velocity only, kept for reference) |
+| `model/lagcn_fusion.py` | Two-tower fusion model with gated stream fusion; `motion_in_channels` controls motion tower input depth |
 | `diagnose_features.py` | Feature-space diagnostic: t-SNE, kNN purity, confusion matrix |
 | `visualize_cpr.py` | CPR visualization: heatmaps, PCA, inter-class similarity |
 | `LAGCN_CPR_NOTES.md` | This document |
