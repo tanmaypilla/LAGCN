@@ -15,7 +15,15 @@
 9. [Why FACEOFF Was Hard in the First Place](#9-why-faceoff-was-hard-in-the-first-place)
 10. [Known Implementation Issues](#10-known-implementation-issues)
 11. [BERT vs CLIP for CPR Generation](#11-bert-vs-clip-for-cpr-generation)
-12. [Solutions and Experiments](#12-solutions-and-experiments)
+12. [Experiment Results](#12-experiment-results)
+    - [12.1 Temporal CPR vs Baseline](#121-temporal-cpr-vs-baseline)
+    - [12.2 Velocity Stream vs Baseline](#122-velocity-stream-vs-baseline)
+    - [12.3 Why Joint + Motion Fusion Is the Natural Next Step](#123-why-joint--motion-fusion-is-the-natural-next-step)
+    - [12.4 Joint + Motion Fusion Results](#124-joint--motion-fusion-results)
+    - [12.5 Data Split Fix](#125-data-split-fix-combined_annotations_v2)
+    - [12.6 Fusion + T=30 Window (no accel)](#126-fusion--t30-window-correct-split-no-accel)
+    - [12.7 Fusion + T=30 + Acceleration Channel](#127-fusion--t30--acceleration-channel)
+    - [12.8 Imbalance Strategies + Sequence Modelling Postprocessing](#128-imbalance-strategies--sequence-modelling-postprocessing)
 
 ---
 
@@ -563,6 +571,25 @@ Even with CLIP, the core structural problems (single-person skeleton, missing ri
 
 **Conclusion:** Velocity stream is a net loss as a standalone. It is complementary to the joint stream but cannot replace it.
 
+### 12.3 Why Joint + Motion Fusion Is the Natural Next Step
+
+The results reveal a clear stream-class interaction:
+
+| Stream | Good for | Poor for |
+|---|---|---|
+| Joint (coordinates) | GLID_BACK, ACCEL_BACK, TRANS_F2B, TRANS_B2F | FACEOFF, POST_WHISTLE |
+| Motion (velocity) | FACEOFF, POST_WHISTLE | GLID_BACK, ACCEL_BACK, TRANS_F2B |
+
+No single stream handles all classes well because different classes are defined by different types of signal:
+- **Motion-defined classes** (GLID_BACK, ACCEL_BACK, TRANS): the *direction* and *rate* of motion encodes the class. Raw coordinates carry this as trajectory.
+- **Event-defined classes** (FACEOFF, POST_WHISTLE): the class is defined by a specific *moment of transition* — deceleration into stillness, or drift after a whistle. Velocity directly encodes this; coordinates do not.
+
+Running both streams through independent backbones and fusing their `(N*M, 256, 16, 20)` feature maps allows the model to use whichever stream is more informative for each class. A gated fusion mechanism learns this class-stream interaction end-to-end: for GLID_BACK samples it learns to weight the joint stream heavily; for FACEOFF samples it learns to weight the motion stream.
+
+The CPR aux branch remains on the joint stream only — exemplar matrices encode positional joint co-activation priors derived from text descriptions of body postures, which is meaningless when applied to velocity features.
+
+---
+
 ### 12.4 Joint + Motion Fusion Results
 
 **Run:** `work_dir/hockey/joint_motion_fusion_CUDNN` | 65 epochs | LR schedule: 0.1 → 0.01 at epoch 35 → 0.001 at epoch 55
@@ -714,22 +741,166 @@ New addition: acceleration stream (second-order delta) concatenated as channels 
 
 ---
 
-### 12.3 Why Joint + Motion Fusion Is the Natural Next Step
+### 12.8 Imbalance Strategies + Sequence Modelling Postprocessing
 
-The results reveal a clear stream-class interaction:
+Three new experiments built on top of the 12.7 baseline (`w30 + accel`, ep39, Top1=81.37%, MCA=58.36%).
 
-| Stream | Good for | Poor for |
-|---|---|---|
-| Joint (coordinates) | GLID_BACK, ACCEL_BACK, TRANS_F2B, TRANS_B2F | FACEOFF, POST_WHISTLE |
-| Motion (velocity) | FACEOFF, POST_WHISTLE | GLID_BACK, ACCEL_BACK, TRANS_F2B |
+---
 
-No single stream handles all classes well because different classes are defined by different types of signal:
-- **Motion-defined classes** (GLID_BACK, ACCEL_BACK, TRANS): the *direction* and *rate* of motion encodes the class. Raw coordinates carry this as trajectory.
-- **Event-defined classes** (FACEOFF, POST_WHISTLE): the class is defined by a specific *moment of transition* — deceleration into stillness, or drift after a whistle. Velocity directly encodes this; coordinates do not.
+#### 12.8.1 Balanced Batch Sampler
 
-Running both streams through independent backbones and fusing their `(N*M, 256, 16, 20)` feature maps allows the model to use whichever stream is more informative for each class. A gated fusion mechanism learns this class-stream interaction end-to-end: for GLID_BACK samples it learns to weight the joint stream heavily; for FACEOFF samples it learns to weight the motion stream.
+**Run:** `work_dir/hockey/joint_motion_fusion_w30_accel_balanced_CUDNN` | same hyperparams as 12.7 | `batch_size=55` (5 samples × 11 classes per batch)
 
-The CPR aux branch remains on the joint stream only — exemplar matrices encode positional joint co-activation priors derived from text descriptions of body postures, which is meaningless when applied to velocity features.
+Each training batch is forced to contain exactly 5 samples from every class via `BalancedBatchSampler` (`feeders/balanced_sampler.py`). Rare classes (PRONE, ON_A_KNEE, ACCEL_BACK) that would appear ~0–1 times per standard batch now appear exactly 5 times. The sampler reshuffles within each class when exhausted and stops after approximately one epoch of data.
+
+Config: `configs/hockey/joint_motion_fusion_w30_accel_balanced.yaml` — `use_balanced_sampler: true`, `batch_size: 55`.
+
+**Best epoch: 59** | Top1=78.64% | MCA=53.31%
+
+#### Per-class at best epoch (59) vs 12.7 baseline
+
+| Class | Baseline (ep39) | Balanced sampler (ep59) | Δ | n |
+|---|---|---|---|---|
+| GLID_FORW | 86.3% | 83.8% | -2.5pp | 2356 |
+| ACCEL_FORW | 88.2% | 87.6% | -0.6pp | 1942 |
+| GLID_BACK | 64.9% | 61.5% | -3.4pp | 410 |
+| ACCEL_BACK | 58.6% | 38.7% | -19.9pp | 111 |
+| TRANS_FORW_TO_BACK | 72.1% | 61.8% | -10.3pp | 136 |
+| TRANS_BACK_TO_FORW | 44.9% | 28.8% | -16.1pp | 118 |
+| POST_WHISTLE_GLIDING | 34.6% | 26.9% | -7.7pp | 78 |
+| FACEOFF_BODY_POSITION | 82.9% | 79.3% | -3.6pp | 111 |
+| MAINTAIN_POSITION | 25.0% | 23.9% | -1.1pp | 88 |
+| PRONE | 75.0% | 75.0% | 0.0pp | 12 |
+| ON_A_KNEE | 9.5% | 19.1% | +9.6pp | 21 |
+
+**Overall:**
+
+| Metric | Baseline (ep39) | Balanced sampler (ep59) | Δ |
+|---|---|---|---|
+| Top-1 | 81.37% | 78.64% | -2.73pp |
+| Mean class acc | 58.36% | 53.31% | -5.05pp |
+
+**Interpretation:** The balanced batch sampler underperformed both the baseline and the weighted loss run. Forcing exactly 5 samples per class per batch severely over-represents the rarest classes (PRONE: 12 train samples, ON_A_KNEE: 39) relative to the dominant ones, creating gradient instability — the model sees PRONE as frequently as GLID_FORW despite a ~180× difference in actual class frequency. ON_A_KNEE improves (+9.6pp) as expected, but nearly every other class regresses, including ACCEL_BACK (-19.9pp) and both transition classes. The weighted loss approach (12.8.2) is a strictly better strategy for this dataset: it re-weights the loss signal without distorting the data distribution the model learns from.
+
+---
+
+#### 12.8.2 Weighted Cross-Entropy Loss
+
+**Run:** `work_dir/hockey/joint_motion_fusion_w30_accel_weighted_cls_CUDNN` | same hyperparams as 12.7 | `batch_size=32`, standard shuffle
+
+Per-class weights applied to the main `CrossEntropyLoss` (aux branch remains unweighted — CPR is a structural prior). Weights are inverse-frequency derived:
+
+| Class | Weight |
+|---|---|
+| GLID_FORW | 0.2162 |
+| ACCEL_FORW | 0.2162 |
+| GLID_BACK | 0.2480 |
+| ACCEL_BACK | 0.5217 |
+| TRANS_FORW_TO_BACK | 0.4594 |
+| TRANS_BACK_TO_FORW | 0.4763 |
+| POST_WHISTLE_GLIDING | 0.5372 |
+| FACEOFF_BODY_POSITION | 0.3699 |
+| MAINTAIN_POSITION | 0.4915 |
+| PRONE | 2.9596 |
+| ON_A_KNEE | 3.6038 |
+
+Config: `configs/hockey/joint_motion_fusion_w30_accel_weighted_cls.yaml` — `class_weights: [...]`.
+
+**Best epoch: 38** | Top1=79.40% | MCA=63.32%
+
+#### Per-class at best epoch (38) vs 12.7 baseline
+
+| Class | Baseline (ep39) | Weighted cls (ep38) | Δ | n |
+|---|---|---|---|---|
+| GLID_FORW | 86.3% | 83.2% | -3.1pp | 2356 |
+| ACCEL_FORW | 88.2% | 85.2% | -3.0pp | 1942 |
+| GLID_BACK | 64.9% | 61.7% | -3.2pp | 410 |
+| ACCEL_BACK | 58.6% | 56.8% | -1.8pp | 111 |
+| TRANS_FORW_TO_BACK | 72.1% | 73.5% | +1.4pp | 136 |
+| TRANS_BACK_TO_FORW | 44.9% | 50.9% | **+6.0pp** | 118 |
+| POST_WHISTLE_GLIDING | 34.6% | 55.1% | **+20.5pp** | 78 |
+| FACEOFF_BODY_POSITION | 82.9% | 77.5% | -5.4pp | 111 |
+| MAINTAIN_POSITION | 25.0% | 42.1% | **+17.1pp** | 88 |
+| PRONE | 75.0% | 58.3% | -16.7pp | 12 |
+| ON_A_KNEE | 9.5% | 52.4% | **+42.9pp** | 21 |
+
+**Overall:**
+
+| Metric | Baseline (ep39) | Weighted cls (ep38) | Δ |
+|---|---|---|---|
+| Top-1 | 81.37% | 79.40% | -1.97pp |
+| **Mean class acc** | 58.36% | **63.32%** | **+4.96pp** |
+
+**Interpretation:** The class weights trade overall Top-1 accuracy for significantly better coverage of minority and difficult classes. ON_A_KNEE jumps from 9.5% → 52.4% (+42.9pp), MAINTAIN from 25% → 42.1% (+17.1pp), POST_WHISTLE from 34.6% → 55.1% (+20.5pp). The cost is paid by the dominant classes (GLID_FORW, ACCEL_FORW, FACEOFF). PRONE regresses (-16.7pp) likely because its 12 test samples are highly sensitive to small shifts and PRONE has similar posture to ON_A_KNEE. This is the best MCA result to date.
+
+---
+
+#### 12.8.3 Viterbi Sequence Modelling (Postprocessing)
+
+Postprocessing script: `sequence_modelling.py`. Uses a pre-computed transition probability matrix (`transition_probs.csv`, estimated from train sequences in `sequence_annotations.pkl`) to run Viterbi decoding across each tracklet's ordered action sequence. `TRANSITION_WEIGHT=0.1` — 10% transition contribution, 90% emission (model scores).
+
+The transition matrix enforces domain constraints (e.g. GLID_FORW → GLID_BACK is disallowed; direction must pass through a transition class) and applies smoothed empirical probabilities for allowed transitions.
+
+Pipeline to reproduce:
+```bash
+# 1. Remap score pkl keys from feeder-style (test_0, test_1...) to frame_dir keys
+python remap_score_keys.py \
+  work_dir/hockey/<run>/epoch1_test_score.pkl \
+  data/annotations/test.pkl \
+  work_dir/hockey/<run>/epoch<N>_test_score_remapped.pkl
+
+# 2. Run Viterbi adjustment
+python sequence_modelling.py \
+  --results work_dir/hockey/<run>/epoch<N>_test_score_remapped.pkl \
+  --transition-csv transition_probs.csv
+
+# 3. Evaluate
+python eval_sequence_adjustment.py  # edit paths inside the script
+```
+
+**Results on baseline w30+accel (ep39):**
+
+| Metric | Original | Viterbi (w=0.1) | Δ |
+|---|---|---|---|
+| Top-1 | 81.37% | 82.41% | **+1.04pp** |
+| Mean class acc | 58.36% | 57.34% | -1.01pp |
+
+| Class | Original | Viterbi | Δ |
+|---|---|---|---|
+| GLID_FORW | 86.3% | 89.1% | +2.8pp |
+| ACCEL_FORW | 88.2% | 88.7% | +0.5pp |
+| GLID_BACK | 64.9% | 63.4% | -1.5pp |
+| ACCEL_BACK | 58.6% | 58.6% | 0.0pp |
+| TRANS_FORW_TO_BACK | 72.1% | 66.2% | -5.9pp |
+| TRANS_BACK_TO_FORW | 44.9% | 37.3% | -7.6pp |
+| POST_WHISTLE_GLIDING | 34.6% | 41.0% | +6.4pp |
+| FACEOFF_BODY_POSITION | 82.9% | 82.9% | 0.0pp |
+| MAINTAIN_POSITION | 25.0% | 23.9% | -1.1pp |
+| PRONE | 75.0% | 75.0% | 0.0pp |
+| ON_A_KNEE | 9.5% | 4.8% | -4.8pp |
+
+**Results on weighted cls (ep38):**
+
+| Metric | Original | Viterbi (w=0.1) | Δ |
+|---|---|---|---|
+| Top-1 | 79.40% | 81.01% | **+1.62pp** |
+| Mean class acc | 63.32% | 62.28% | -1.04pp |
+
+| Class | Original | Viterbi | Δ |
+|---|---|---|---|
+| GLID_FORW | 83.2% | 86.6% | +3.4pp |
+| ACCEL_FORW | 85.2% | 86.7% | +1.5pp |
+| GLID_BACK | 61.7% | 60.7% | -1.0pp |
+| ACCEL_BACK | 56.8% | 59.5% | +2.7pp |
+| TRANS_FORW_TO_BACK | 73.5% | 64.7% | -8.8pp |
+| TRANS_BACK_TO_FORW | 50.9% | 41.5% | -9.3pp |
+| POST_WHISTLE_GLIDING | 55.1% | 51.3% | -3.9pp |
+| FACEOFF_BODY_POSITION | 77.5% | 80.2% | +2.7pp |
+| MAINTAIN_POSITION | 42.1% | 43.2% | +1.1pp |
+| PRONE | 58.3% | 58.3% | 0.0pp |
+| ON_A_KNEE | 52.4% | 52.4% | 0.0pp |
+
+**Interpretation:** Viterbi consistently improves Top-1 (+1.0–1.6pp) by smoothing dominant-class predictions across sequences. However, it hurts mean class accuracy because the transition matrix is estimated from training data and biases against rare transitions — TRANS_BACK_TO_FORW loses -7.6 to -9.3pp across both models. The transition weight of 0.1 is already conservative; lower values or a no-constraints matrix may help retain minority-class gains.
 
 ---
 
